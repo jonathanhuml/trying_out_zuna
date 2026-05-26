@@ -73,6 +73,7 @@ import seaborn as sns
 import torch
 from braindecode import EEGClassifier
 from braindecode.models import EEGNeX, BrainModule, DGCNN, ZUNA
+from braindecode.models.zuna import ZUNA_HF_REPO, ZUNA_HF_WEIGHTS
 
 from sklearn.pipeline import make_pipeline
 from skorch.callbacks import EarlyStopping, EpochScoring
@@ -151,12 +152,24 @@ def create_model(model_name, n_times, n_chans, n_outputs, class_module, sfreq):
 )
 
 ##### PIPELINE PER MODEL #####
+# Load pretrained ZUNA encoder and freeze it — only the classification head trains.
+zuna_module = ZUNA.from_pretrained(
+    ZUNA_HF_REPO,
+    filename=ZUNA_HF_WEIGHTS,
+    chs_info=zuna_chs_info,
+    n_outputs=n_classes,
+    n_times=zuna_n_times,
+    sfreq=ZUNA_SFREQ,
+)
+for p in zuna_module.encoder.parameters():
+    p.requires_grad = False
+
 # Create the pipelines
 model_configs = [
     ("EEGNeX", EEGNeX(n_chans=n_chans, n_outputs=n_classes, n_times=n_times)),
     ("BrainModule", BrainModule(n_chans=n_chans, n_outputs=n_classes, n_times=n_times)),
     ("DGCNN", DGCNN(chs_info=chs_info, n_outputs=n_classes, n_times=n_times)),
-    ("ZUNA", ZUNA(chs_info=zuna_chs_info, n_outputs=n_classes, n_times=zuna_n_times, sfreq=ZUNA_SFREQ)),
+    ("ZUNA", zuna_module),
 ]
 
 pipes = {}
@@ -188,7 +201,8 @@ zuna_results = CrossSessionEvaluation(
 ).process({"ZUNA": pipes["ZUNA"]})
 results = pd.concat([results, zuna_results], ignore_index=True)
 
-print(results.head())
+print("\n=== Full results (all rows) ===")
+print(results.to_string(index=False))
 
 def around(x):
   mean = np.around(x*100, 2)
@@ -197,15 +211,23 @@ def around(x):
 pd.options.display.float_format = '{:.2f}'.format
 mean = results.groupby(["pipeline", "session", "subject"])["score"].agg([around]).unstack()
 
-mean
+print("\n=== Mean accuracy (%) per pipeline / session / subject ===")
+print(mean)
+
+print("\n=== Mean accuracy per pipeline (averaged over subjects + sessions) ===")
+print(results.groupby("pipeline")["score"].agg(["mean", "std", "count"]))
+
+results.to_csv(PROJECT_DIR / "results.csv", index=False)
+print(f"\nSaved per-trial results to {PROJECT_DIR / 'results.csv'}")
 
 fig, ax = plt.subplots(figsize=(15, 5))
 sns.barplot(data=results, y="score", x="subject", hue="pipeline", ax=ax)
 ax.legend(loc=2, borderaxespad=0., ncols=5)
 plt.ylim(0.0, 1.0)
+fig.savefig(PROJECT_DIR / "results_by_subject.png", dpi=120, bbox_inches="tight")
 
-plt.show()
+fig2 = plt.figure()
+sns.barplot(data=results, y="score", x="pipeline", hue="pipeline", palette="viridis", legend=False)
+fig2.savefig(PROJECT_DIR / "results_by_pipeline.png", dpi=120, bbox_inches="tight")
 
-plt.figure()
-sns.barplot(data=results, y="score", x="pipeline", palette="viridis")
-plt.show()
+print(f"Saved figures to {PROJECT_DIR}/results_by_*.png")
